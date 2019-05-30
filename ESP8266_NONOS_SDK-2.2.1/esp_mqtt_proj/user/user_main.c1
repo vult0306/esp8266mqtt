@@ -1,0 +1,372 @@
+/* main.c -- MQTT client example
+*
+* Copyright (c) 2014-2015, Tuan PM <tuanpm at live dot com>
+* All rights reserved.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*
+* * Redistributions of source code must retain the above copyright notice,
+* this list of conditions and the following disclaimer.
+* * Redistributions in binary form must reproduce the above copyright
+* notice, this list of conditions and the following disclaimer in the
+* documentation and/or other materials provided with the distribution.
+* * Neither the name of Redis nor the names of its contributors may be used
+* to endorse or promote products derived from this software without
+* specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+* ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+* LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+* CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+* SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+* INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+* CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+* ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+* POSSIBILITY OF SUCH DAMAGE.
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "ets_sys.h"
+#include "driver/uart.h"
+#include "osapi.h"
+#include "mqtt.h"
+#include "wifi.h"
+#include "config.h"
+#include "debug.h"
+#include "gpio.h"
+#include "user_interface.h"
+#include "mem.h"
+#include "sntp.h"
+
+#define DEBUG 1
+#define MAX_TOPIC 4
+#define TOPIC_LENGTH 10
+static char GARDEN[] = "/garden";
+static char GARDEN_FB[] = "/garden_fb";
+static char SCHEDULE[] = "/schedule";
+static char SCHEDULE_FB[] = "/schedule_fb";
+MQTT_Client mqttClient;
+MQTT_Client* mqttClientptr;
+typedef unsigned long u32_t;
+static ETSTimer sntp_timer, sntp_timer1;
+static os_timer_t timer1; //use to periodically publish port status
+volatile uint8_t watering_process;  // time to finish watering (ss)
+bool morning_watering=FALSE;        // flag to indicate water is already taken
+bool schedule_busy_updating_flag=FALSE;
+bool schedule_published = FALSE;   // flag to indicate scheduled was published
+
+
+void publish_watering_process(MQTT_Client *args)
+{
+    char *processc = (char*)os_zalloc(5);
+    MQTT_Client* client = (MQTT_Client*)args;
+    char *topic;
+
+    os_memset(processc,0,sizeof(processc));
+    processc[0] = (char)((watering_process/1000) + 48);
+    processc[1] = (char)(((watering_process - ((watering_process/1000)*1000))/100) + 48);
+    processc[2] = (char)(((watering_process - ((watering_process/100)*100))/10) + 48);
+    processc[3] = (char)((watering_process%10) + 48);
+    topic=os_zalloc(sizeof(GARDEN_FB));
+    topic=GARDEN_FB;
+    if (watering_process > 0){
+#ifdef DEBUG
+    INFO("watering_process: %d \r\n",watering_process);
+#endif
+        watering_process -= 1;
+    }
+    else{
+        morning_watering = FALSE;
+        os_timer_disarm(&timer1);
+        GPIO_OUTPUT_SET(4, 0);
+    }
+    MQTT_Publish(client, topic, processc, 4, 0, 0);
+    os_free(processc);
+    os_free(topic);
+}
+
+void sntpfn()
+{
+    u32_t ts = 0;
+    char *realtime;
+    int min,hour;
+    ts = sntp_get_current_timestamp();
+    if (ts == 0) {
+        os_printf("did not get a valid time from sntp server\n");
+    } else {
+            realtime = sntp_get_real_time(ts);
+            hour = strtol(realtime+11, (char**)NULL, 10);
+            min = strtol(realtime+14, (char**)NULL, 10);
+#ifdef DEBUG
+    os_printf("Start internet connection at: %s\n", sntp_get_real_time(ts));
+#endif
+            os_timer_disarm(&sntp_timer);
+            MQTT_Connect(&mqttClient);
+    }
+}
+
+void everyday_watering()
+{
+    u32_t ts = 0;
+    char *realtime;
+    char *countdown = (char*)os_zalloc(19);
+    ts = sntp_get_current_timestamp();
+    realtime = sntp_get_real_time(ts);
+    int hh,mm,mmmm,durgap_mmmm,sod_2_now,repeated,current_pos_in_period;
+#ifdef DEBUG
+    // os_printf("daily timer: %s\n", sntp_get_real_time(ts));
+#endif
+
+    if (ts == 0) {
+        os_printf("did not get a valid time from sntp server\n");
+    } else {
+        //123456789123456789123456789
+        //         1        2
+        //Sun Dec 16 17:49:55 2018
+        hh = strtol(realtime+11, (char**)NULL, 10);
+        mm = strtol(realtime+14, (char**)NULL, 10);
+        mmmm = hh*100 + mm;
+        if( (mmmm > usrCfg.sod) && (mmmm < usrCfg.eod) ){
+     //sod                                                                eod
+        //---------||---------||---------||---------||---------||---------||
+        //dur| gap || 
+        //---|-----||---|-----||---|-----||---|-----||---|-----||---|-----||
+        //---------------------------|current_pos_in_period
+        //--------------------||sod_2_now
+            sod_2_now = mmmm - usrCfg.sod;
+            durgap_mmmm = strtol(usrCfg.dur, (char**)NULL, 10) + strtol(usrCfg.gap, (char**)NULL, 10);
+            repeated = sod_2_now/durgap_mmmm;
+            current_pos_in_period = mmmm - (durgap_mmmm * repeated);
+            if( (current_pos_in_period <= strtol(usrCfg.dur, (char**)NULL, 10)) &&
+                (schedule_busy_updating_flag != TRUE) &&
+                (schedule_published == FALSE) ){
+                //yes, we are in watering
+                os_printf("periodically at : %s\n",realtime);
+                schedule_published = TRUE;
+                MQTT_Publish(mqttClientptr, GARDEN, usrCfg.dur, 2, 0, 0);
+            }
+        }
+        // cur_ss = strtol(realtime+17, (char**)NULL, 10);
+        // cur_mmmm = cur_hh*60 + cur_mm;
+        // sch_mmmm = usrCfg.sod_hh*60 + usrCfg.sod_mm;
+        // if( (cur_mmmm < sch_mmmm) && ((sch_mmmm - cur_mmmm) < 2) ){ //10 mins to watering
+            // countdown = "x mins to watering";
+            // countdown[0] = (char)((sch_mmmm - cur_mmmm) + 48);
+            // MQTT_Publish(mqttClientptr, SCHEDULE_FB, countdown, 19, 0, 0);
+        // }
+        // if ((usrCfg.sod_hh == cur_hh) && (usrCfg.sod_mm == cur_mm) && (!morning_watering) && (schedule_busy_updating_flag != TRUE) && (schedule_published == FALSE)){
+            // os_printf("morning watering1 : %s\n",usrCfg.sod_dur);
+            // schedule_published = TRUE;
+            // MQTT_Publish(mqttClientptr, GARDEN, usrCfg.sod_dur, 2, 0, 0);
+        // }
+    }
+}
+
+void wifiConnectCb(uint8_t status)
+{
+    if(status == STATION_GOT_IP){
+        sntp_setservername(0, "pool.ntp.org");        // set sntp server after got ip address
+        if(sntp_set_timezone(7)){
+            sntp_init();
+        }
+        os_timer_disarm(&sntp_timer);
+        os_timer_setfn(&sntp_timer, (os_timer_func_t *)sntpfn, NULL);
+        os_timer_arm(&sntp_timer, 1000, 1);//1s
+    } else {
+          MQTT_Disconnect(&mqttClient);
+    }
+}
+
+void mqttConnectedCb(uint32_t *args)
+{
+    //MQTT_Client* client = (MQTT_Client*)args;
+    mqttClientptr = (MQTT_Client*)args;
+    MQTT_Client* client = mqttClientptr;
+#ifdef DEBUG
+    INFO("MQTT: Connected\r\n");
+#endif
+    MQTT_Subscribe(client, GARDEN, 1);
+    MQTT_Subscribe(client, SCHEDULE, 1);
+//    MQTT_Subscribe(client, "/mqtt/topic/1", 1);
+//    MQTT_Subscribe(client, "/mqtt/topic/2", 2);
+//    MQTT_Publish(client, "/mqtt/topic/0", "hello0", 6, 0, 0);
+//    MQTT_Publish(client, "/mqtt/topic/1", "hello1", 6, 1, 0);
+//    MQTT_Publish(client, "/mqtt/topic/2", "hello2", 6, 2, 0);
+}
+
+void mqttDisconnectedCb(uint32_t *args)
+{
+    MQTT_Client* client = (MQTT_Client*)args;
+#ifdef DEBUG
+    INFO("MQTT: Disconnected\r\n");
+#endif
+}
+
+void mqttPublishedCb(uint32_t *args)
+{
+    MQTT_Client* client = (MQTT_Client*)args;
+#ifdef DEBUG
+    INFO("MQTT: Published\r\n");
+#endif    
+}
+
+void mqttDataCb(uint32_t *args, const char* topic, uint32_t topic_len, const char *data, uint32_t data_len)
+{
+    char *topicBuf = (char*)os_zalloc(topic_len+1),
+            *dataBuf = (char*)os_zalloc(data_len+1);
+    uint8_t sod,eod,dur,gap;
+    char *schedule = (char*)os_zalloc(17);
+    MQTT_Client* client = (MQTT_Client*)args;
+
+    os_memcpy(topicBuf, topic, topic_len);
+    topicBuf[topic_len] = 0;
+
+    os_memcpy(dataBuf, data, data_len);
+    dataBuf[data_len] = 0;
+#ifdef DEBUG
+    INFO("Send topic: %s, data: %s \r\n", topicBuf, dataBuf);
+#endif
+    if( !strcmp(topicBuf,GARDEN) ){
+        if( dataBuf[0] != '0' ){
+            watering_process = strtol(dataBuf, (char**)NULL, 10);
+            watering_process = watering_process*60;
+            GPIO_OUTPUT_SET(4, 1);
+            os_timer_disarm(&timer1);
+            os_timer_setfn(&timer1, (os_timer_func_t *)publish_watering_process, args);
+            os_timer_arm(&timer1, 1000, 1);//1s
+        }
+        else{
+            GPIO_OUTPUT_SET(4, 0); // turn off watering
+            os_timer_disarm(&timer1); // disable publishing watering process
+            MQTT_Publish(client, GARDEN_FB, dataBuf, 1, 0, 0); //
+        }
+    }
+    if( !strcmp(topicBuf,SCHEDULE) ){
+        //          1         2         3         4 
+        //1234567890123456789012345678901234567890123456789 
+        //hhmm/hhmm/mm/mm
+        //sod/eod/dur/gap
+        sod = strtol(dataBuf, (char**)NULL, 10);
+        eod = strtol(dataBuf+5, (char**)NULL, 10); 
+        //dur = strtol(dataBuf+10, (char**)NULL, 10);
+        //gap = strtol(dataBuf+13, (char**)NULL, 10);
+        
+        schedule_busy_updating_flag = TRUE; // set busy updating flag first
+        schedule_published = FALSE;         // we haven't published this update yet
+        usrCfg.sod  = sod;
+        usrCfg.eod  = eod;
+        os_memcpy(usrCfg.dur, dataBuf+10, 2);
+        os_memcpy(usrCfg.gap, dataBuf+13, 2);
+        //store this update to flash asap
+        if (!USRCFG_Save()){
+            //the change has been flashed
+            schedule_busy_updating_flag = FALSE;
+        }
+                  //          1         2         3         4 
+                  //1234567890123456789012345678901234567890123456789 
+        schedule = "hh:mm/hh:mm/mm/mm";
+        os_memcpy(schedule, dataBuf, 2);
+        os_memcpy(schedule+3, dataBuf+2, 2);
+        os_memcpy(schedule+6, dataBuf+5, 2);
+        os_memcpy(schedule+9, dataBuf+7, 2);
+        os_memcpy(schedule+12, dataBuf+10, 2);
+        os_memcpy(schedule+15, dataBuf+13, 2);
+
+        topicBuf = SCHEDULE_FB;
+        MQTT_Publish(client, topicBuf, schedule, 17, 0, 0); //
+    }
+
+    os_free(topicBuf);
+    os_free(dataBuf);
+}
+
+
+/******************************************************************************
+ * FunctionName : user_rf_cal_sector_set
+ * Description  : SDK just reversed 4 sectors, used for rf init data and paramters.
+ *                We add this function to force users to set rf cal sector, since
+ *                we don't know which sector is free in user's application.
+ *                sector map for last several sectors : ABCCC
+ *                A : rf cal
+ *                B : rf init data
+ *                C : sdk parameters
+ * Parameters   : none
+ * Returns      : rf cal sector
+ *******************************************************************************/
+uint32 ICACHE_FLASH_ATTR
+user_rf_cal_sector_set(void)
+{
+    enum flash_size_map size_map = system_get_flash_size_map();
+    uint32 rf_cal_sec = 0;
+
+    switch (size_map) {
+        case FLASH_SIZE_4M_MAP_256_256:
+            rf_cal_sec = 128 - 5;
+            break;
+
+        case FLASH_SIZE_8M_MAP_512_512:
+            rf_cal_sec = 256 - 5;
+            break;
+
+        case FLASH_SIZE_16M_MAP_512_512:
+        case FLASH_SIZE_16M_MAP_1024_1024:
+            rf_cal_sec = 512 - 5;
+            break;
+
+        case FLASH_SIZE_32M_MAP_512_512:
+        case FLASH_SIZE_32M_MAP_1024_1024:
+            rf_cal_sec = 1024 - 5;
+            break;
+
+        case FLASH_SIZE_64M_MAP_1024_1024:
+            rf_cal_sec = 2048 - 5;
+            break;
+        case FLASH_SIZE_128M_MAP_1024_1024:
+            rf_cal_sec = 4096 - 5;
+            break;
+        default:
+            rf_cal_sec = 0;
+            break;
+    }
+
+    return rf_cal_sec;
+}
+
+
+void user_init(void)
+{
+    uart_init(BIT_RATE_115200, BIT_RATE_115200);
+    os_delay_us(5000);
+
+    CFG_Load();
+
+    WIFI_Connect(sysCfg.sta_ssid, sysCfg.sta_pwd, wifiConnectCb);
+
+    MQTT_InitConnection(&mqttClient, sysCfg.mqtt_host, sysCfg.mqtt_port, sysCfg.security);
+    //MQTT_InitConnection(&mqttClient, "192.168.11.122", 1880, 0);
+
+    MQTT_InitClient(&mqttClient, sysCfg.device_id, sysCfg.mqtt_user, sysCfg.mqtt_pass, sysCfg.mqtt_keepalive, 1);
+    //MQTT_InitClient(&mqttClient, "client_id", "user", "pass", 120, 1);
+
+    MQTT_InitLWT(&mqttClient, "/lwt", "offline", 0, 0);
+    MQTT_OnConnected(&mqttClient, mqttConnectedCb);
+    MQTT_OnDisconnected(&mqttClient, mqttDisconnectedCb);
+    MQTT_OnPublished(&mqttClient, mqttPublishedCb);
+    MQTT_OnData(&mqttClient, mqttDataCb);
+
+    //watering at every 06:00 or 18:00
+    os_timer_disarm(&sntp_timer1);
+    os_timer_setfn(&sntp_timer1, (os_timer_func_t *)everyday_watering, NULL);
+    os_timer_arm(&sntp_timer1, 1000, 1);//1s
+#ifdef DEBUG
+    os_printf("usrCfg.sod_hh : %d\n",usrCfg.sod);
+    os_printf("usrCfg.sod_mm : %d\n",usrCfg.eod);
+    os_printf("usrCfg.sod_dur : %s\n",usrCfg.dur);
+    os_printf("usrCfg.sod_dur : %s\n",usrCfg.gap);
+    INFO("\r\nSystem started ...\r\n");
+#endif
+}
