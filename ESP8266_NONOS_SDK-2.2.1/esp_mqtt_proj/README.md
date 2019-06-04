@@ -74,4 +74,14 @@ when the demo starts up:
 - make sure your MQTT broker SSL/TLS certificate configurate valid 
 
 
+**Add smart config**
+-add key.h, led.h to esp_mqtt_proj/include/modules
+-add key.c, led.c to esp_mqtt_proj/modules
+-add sc.c, sc.h, user_json.h, user_json.c, wps.h, wps.c, rfinit.c to esp_mqtt_proj/user
+-edit esp_mqtt_proj/Makefile to include -lairkiss\
+-edit key.c to parce parameter
+from
+    ETS_GPIO_INTR_ATTACH(key_intr_handler, keys);
+to
+    ETS_GPIO_INTR_ATTACH((ets_isr_t)key_intr_handler, keys);
 

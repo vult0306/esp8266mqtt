@@ -32,6 +32,8 @@
 #include <string.h>
 #include "ets_sys.h"
 #include "driver/uart.h"
+#include "key.h"
+#include "led.h"
 #include "osapi.h"
 #include "mqtt.h"
 #include "wifi.h"
@@ -42,7 +44,19 @@
 #include "mem.h"
 #include "sntp.h"
 #include "user_config.h"
+#include "wps.h"
+#include "sc.h"
 
+/* smart config macros and variables */
+#define KEY_NUM        1
+#define KEY_IO_MUX     PERIPHS_IO_MUX_MTCK_U
+#define KEY_IO_NUM     0
+#define KEY_IO_FUNC    FUNC_GPIO0
+LOCAL struct keys_param keys;
+LOCAL struct single_key_param *single_key;
+
+
+/* mqtt marcro and variables */
 #define ON 1
 #define OFF 0
 #define DEBUG OFF
@@ -66,6 +80,24 @@ static os_timer_t timer1; //use to periodically publish port status
 bool watering=FALSE;        // flag to indicate water is already taken
 bool schedule_busy_updating_flag=FALSE;
 bool  load_config_done;
+
+// extern void led_init();
+// extern void led_write(uint8_t value);
+// extern void led_blink(uint32_t on_time, uint32_t off_time);
+/* function definition */
+LOCAL void ICACHE_FLASH_ATTR short_press(void)
+{
+  INFO("[KEY] Short press, run smartconfig\r\n");
+  led_blink(1, 1);
+  sc_start();
+}
+
+LOCAL void ICACHE_FLASH_ATTR long_press(void)
+{
+  INFO("[KEY] Long press, run wps\r\n");
+  led_blink(5, 5);
+}
+
 void publish_watering_process(MQTT_Client *args, int watering_process)
 {
     char *processc = (char*)os_zalloc(5);
@@ -375,11 +407,27 @@ user_rf_cal_sector_set(void)
     return rf_cal_sec;
 }
 
+/* this function initialize the button press handler
+ * long press: go to wps setup
+ * short press: go to smart config setup
+ */
+void ICACHE_FLASH_ATTR smartconfig_init(void)
+{
+    single_key = key_init_single(KEY_IO_NUM, KEY_IO_MUX, KEY_IO_FUNC,
+                                long_press, short_press);
 
+    keys.key_num = KEY_NUM;
+    keys.single_key = &single_key;
+
+    key_init(&keys);
+    led_init();
+    led_blink(10, 10); //1 second on, 1 second off
+}
 void user_init(void)
 {
     uart_init(BIT_RATE_115200, BIT_RATE_115200);
-    os_delay_us(5000);
+    os_delay_us(1000);
+    smartconfig_init();
 
     CFG_Load();
 

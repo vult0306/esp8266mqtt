@@ -407,6 +407,11 @@ $(foreach image,$(GEN_IMAGES),$(eval $(call MakeImage,$(basename $(image)))))
 # Required for each makefile to inherit from the parent
 #
 
-INCLUDES := $(INCLUDES) -I $(PDIR)include -I $(PDIR)include/$(TARGET) -I $(PDIR)driver_lib/include
+# $(PDIR)include
+#	ESP8266_NONOS_SDK-2.2.1\include\
+
+# $(PDIR)driver_lib/include/driver
+#	peripheral library
+INCLUDES := $(INCLUDES) -I $(PDIR)include -I $(PDIR)include/$(TARGET) -I $(PDIR)driver_lib/include/driver/
 PDIR := ../$(PDIR)
 sinclude $(PDIR)Makefile
