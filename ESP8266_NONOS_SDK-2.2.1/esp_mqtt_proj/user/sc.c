@@ -8,7 +8,7 @@
 #include "user_interface.h"
 #include "smartconfig.h"
 #include "airkiss.h"
-
+#include "config.h"
 #include "led.h"
 
 
@@ -148,7 +148,9 @@ smartconfig_done(sc_status status, void *pdata)
   case SC_STATUS_LINK:
     INFO("[SC] SC_STATUS_LINK\n");
     struct station_config *sta_conf = pdata;
-
+    os_strncpy(sysCfg.sta_ssid, sta_conf->ssid, sizeof(sysCfg.sta_ssid) - 1);
+    os_strncpy(sysCfg.sta_pwd, sta_conf->password, sizeof(sysCfg.sta_pwd) - 1);
+    CFG_Save();
     wifi_station_set_config(sta_conf);
     wifi_station_disconnect();
     wifi_station_connect();
@@ -178,7 +180,9 @@ smartconfig_done(sc_status status, void *pdata)
 void ICACHE_FLASH_ATTR
 sc_start(void)
 {
-  smartconfig_set_type(SC_TYPE_ESPTOUCH_AIRKISS); //SC_TYPE_ESPTOUCH,SC_TYPE_AIRKISS,SC_TYPE_ESPTOUCH_AIRKISS
+    // user_rf_pre_init();
+    wifi_set_opmode_current(STATION_MODE);
+    smartconfig_set_type(SC_TYPE_ESPTOUCH); //SC_TYPE_ESPTOUCH,SC_TYPE_AIRKISS,SC_TYPE_ESPTOUCH_AIRKISS
   if(sc_run)
     smartconfig_stop();
   smartconfig_start(smartconfig_done);

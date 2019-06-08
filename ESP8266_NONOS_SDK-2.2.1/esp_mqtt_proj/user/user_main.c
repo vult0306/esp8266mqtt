@@ -31,7 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ets_sys.h"
-#include "driver/uart.h"
+#include "uart.h"
 #include "key.h"
 #include "led.h"
 #include "osapi.h"
@@ -76,26 +76,27 @@ MQTT_Client mqttClient;
 MQTT_Client* mqttClientptr=NULL;
 typedef unsigned long u32_t;
 static ETSTimer sntp_timer, sntp_timer1;
-static os_timer_t timer1; //use to periodically publish port status
+// static os_timer_t timer1; //use to periodically publish port status
 bool watering=FALSE;        // flag to indicate water is already taken
 bool schedule_busy_updating_flag=FALSE;
 bool  load_config_done;
-
 // extern void led_init();
 // extern void led_write(uint8_t value);
 // extern void led_blink(uint32_t on_time, uint32_t off_time);
 /* function definition */
 LOCAL void ICACHE_FLASH_ATTR short_press(void)
 {
-  INFO("[KEY] Short press, run smartconfig\r\n");
-  led_blink(1, 1);
-  sc_start();
+    INFO("[KEY] Short press, run smartconfig\r\n");
+    //   led_blink(1, 1);
+    // if(!sc_run)
+        sc_start();
 }
 
 LOCAL void ICACHE_FLASH_ATTR long_press(void)
 {
   INFO("[KEY] Long press, run wps\r\n");
-  led_blink(5, 5);
+//   sc_start();
+//   led_blink(5, 5);
 }
 
 void publish_watering_process(MQTT_Client *args, int watering_process)
@@ -420,24 +421,26 @@ void ICACHE_FLASH_ATTR smartconfig_init(void)
     keys.single_key = &single_key;
 
     key_init(&keys);
-    led_init();
-    led_blink(10, 10); //1 second on, 1 second off
+    // led_init();
+    // led_blink(10, 10); //1 second on, 1 second off
 }
+
 void user_init(void)
 {
+    bool status;
+    struct softap_config *config;
     uart_init(BIT_RATE_115200, BIT_RATE_115200);
     os_delay_us(1000);
+    //user need to press the smart config button within 5s after power up
+    wifi_set_opmode_current(STATION_MODE);
     smartconfig_init();
-
     CFG_Load();
 
     WIFI_Connect(sysCfg.sta_ssid, sysCfg.sta_pwd, wifiConnectCb);
 
     MQTT_InitConnection(&mqttClient, sysCfg.mqtt_host, sysCfg.mqtt_port, sysCfg.security);
-    //MQTT_InitConnection(&mqttClient, "192.168.11.122", 1880, 0);
 
     MQTT_InitClient(&mqttClient, sysCfg.device_id, sysCfg.mqtt_user, sysCfg.mqtt_pass, sysCfg.mqtt_keepalive, 1);
-    //MQTT_InitClient(&mqttClient, "client_id", "user", "pass", 120, 1);
 
     MQTT_InitLWT(&mqttClient, "/lwt", "offline", 0, 0);
     MQTT_OnConnected(&mqttClient, mqttConnectedCb);
@@ -449,6 +452,7 @@ void user_init(void)
     os_timer_disarm(&sntp_timer1);
     os_timer_setfn(&sntp_timer1, (os_timer_func_t *)everyday_watering, NULL);
     os_timer_arm(&sntp_timer1, 1000, 1);//1s
+
 #if (DEBUG==ON)
     os_printf("usrCfg.sod : %d\n",usrCfg.sod);
     os_printf("usrCfg.sod : %d\n",usrCfg.eod);

@@ -11,7 +11,7 @@ typedef enum{
 
 /*IMPORTANT: the following configuration maybe need modified*/
 /***********************************************************************************************************************/
-#define CFG_HOLDER    0x00FF554A    /* Change this value to load default configurations */
+#define CFG_HOLDER    0x00FF55A4    /* Change this value to load default configurations */
 
 /*DEFAULT CONFIGURATIONS*/
 
@@ -20,8 +20,8 @@ typedef enum{
 #define MQTT_CLIENT_ID       "0414"    // the ID of yourself, any string is OK,client would use this ID register itself to MQTT server
 #define MQTT_USER            "fmvpjktc"//"vle" // your MQTT login name, if MQTT server allow anonymous login,any string is OK, otherwise, please input valid login name which you had registered
 #define MQTT_PASS            "7aawEYkWnMM9"//"123456" // you MQTT login password, same as above
-#define STA_SSID "Mynori"    // your AP/router SSID to config your device networking
-#define STA_PASS "Tramy289" // your AP/router password
+#define STA_SSID ""    // your AP/router SSID to config your device networking
+#define STA_PASS "" // your AP/router password
 
 #define DEFAULT_SECURITY    NO_TLS      // very important: you must config DEFAULT_SECURITY for SSL/TLS
 
